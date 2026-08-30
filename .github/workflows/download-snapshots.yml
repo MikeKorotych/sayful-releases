@@ -24,7 +24,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          releases="$(gh api -X GET "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          releases="$(gh api -X GET --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" | jq 'add')"
           snapshot="$(jq -c --arg date "$(date -u +%F)" '
             [
               .[]
@@ -63,12 +63,15 @@ jobs:
             map(select(.date != $snapshot.date))
             + [$snapshot]
             | sort_by(.date)
+            | if length > 365 then .[-365:] else . end
           ' <<<"$history")"
           body="$(jq -rn --arg history "$updated" '
             "This issue stores public, count-only GitHub Release asset snapshots for the private Sayful admin dashboard. A scheduled workflow maintains the JSON block. No account, feedback, device, or user data belongs here.\n\n<!-- DOWNLOAD_SNAPSHOTS_START -->\n" + $history + "\n<!-- DOWNLOAD_SNAPSHOTS_END -->\n"
           ')"
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/${DATA_ISSUE_NUMBER}" -f body="$body" >/dev/null
-          echo "### DMG download snapshot" >> "$GITHUB_STEP_SUMMARY"
-          echo '```json' >> "$GITHUB_STEP_SUMMARY"
-          echo "$SNAPSHOT" | jq . >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### DMG download snapshot"
+            echo '```json'
+            echo "$SNAPSHOT" | jq .
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
