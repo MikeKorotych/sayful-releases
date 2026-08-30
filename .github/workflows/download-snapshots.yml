@@ -1,0 +1,74 @@
+name: Record DMG download snapshot
+
+on:
+  schedule:
+    - cron: '5 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: sayful-download-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    env:
+      DATA_ISSUE_NUMBER: '1'
+    steps:
+      - name: Read current DMG counters
+        id: snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          releases="$(gh api -X GET "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          snapshot="$(jq -c --arg date "$(date -u +%F)" '
+            [
+              .[]
+              | select(.draft | not)
+              | {
+                  tag: .tag_name,
+                  publishedAt: .published_at,
+                  downloads: ([.assets[] | select(.name | test("\\.dmg$"; "i")) | .download_count] | add // 0),
+                  hasDMG: any(.assets[]; .name | test("\\.dmg$"; "i"))
+                }
+              | select(.hasDMG)
+            ] as $releases
+            | ($releases | sort_by(.publishedAt) | last) as $latest
+            | {
+                date: $date,
+                totalDownloads: ([$releases[].downloads] | add // 0),
+                latestTag: ($latest.tag // ""),
+                latestDownloads: ($latest.downloads // 0),
+                releaseCount: ($releases | length)
+              }
+          ' <<<"$releases")"
+          echo "snapshot=$snapshot" >> "$GITHUB_OUTPUT"
+
+      - name: Store one snapshot for today
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT: ${{ steps.snapshot.outputs.snapshot }}
+        run: |
+          issue="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${DATA_ISSUE_NUMBER}")"
+          history="$(jq -r '
+            .body
+            | capture("(?s)<!-- DOWNLOAD_SNAPSHOTS_START -->\\s*(?<json>\\[.*?\\])\\s*<!-- DOWNLOAD_SNAPSHOTS_END -->")
+            | .json
+          ' <<<"$issue")"
+          updated="$(jq --argjson snapshot "$SNAPSHOT" '
+            map(select(.date != $snapshot.date))
+            + [$snapshot]
+            | sort_by(.date)
+          ' <<<"$history")"
+          body="$(jq -rn --arg history "$updated" '
+            "This issue stores public, count-only GitHub Release asset snapshots for the private Sayful admin dashboard. A scheduled workflow maintains the JSON block. No account, feedback, device, or user data belongs here.\n\n<!-- DOWNLOAD_SNAPSHOTS_START -->\n" + $history + "\n<!-- DOWNLOAD_SNAPSHOTS_END -->\n"
+          ')"
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/${DATA_ISSUE_NUMBER}" -f body="$body" >/dev/null
+          echo "### DMG download snapshot" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          echo "$SNAPSHOT" | jq . >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
